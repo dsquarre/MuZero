@@ -35,16 +35,16 @@ class Node:
         self.value = float(0)
    
     #only use f and create all children. when to use g? when selecting best child and action has been chosen. 
-    def add_links(self,network,Env):
+    def add_links(self,network,action_space):
         pi,v = network.f(self.state)
         policy = torch.softmax(pi,dim=1).squeeze(0)
         self.v = v.item()
         self.policy = policy.item()
-        for a in Env.action_space():
+        for a in action_space:
             child = Link(self,a)
             self.children.append(child)
 
-    def expand(self,link,network,Env):
+    def expand(self,link,network,action_space):
         action = link.action
         r,next_state = network.g(torch.stack((self.state,action),dim=0))
         link.R = r
@@ -54,7 +54,7 @@ class Node:
         policy = torch.softmax(pi,dim=1).squeeze(0)
         next_node.v = v.item()
         next_node.policy = policy.item()
-        for a in Env.action_space():
+        for a in action_space:
             child = Link(next_node,a)
             next_node.children.append(child)
         return next_node
@@ -86,9 +86,10 @@ class Node:
 
 class MCTS:
     #fix this-> basically return all those shits masking the values
-    def simulate(self,state,dots,turn,network,valid_actions,sims=800):
+    def simulate(self,obs,action_space,valid_actions,network,sims=800):
+        state = network.h(obs)
         root =Node(state)
-        root.add_links(network,dots,turn)
+        root.add_links(network,action_space)
         link = None
         l = 0
         for i in range(sims):
@@ -97,8 +98,7 @@ class MCTS:
                 l+=1
                 if link: 
                     break
-                turn *=-1
-            root = root.expand(link,network,dots,turn)
+            root = root.expand(link,network,action_space)
             root = self.backup(root,l)
             #one thing I'm not sure about is suppose I accidentally pick a state which is really close to end,
             #but since my mcts and g doesnt know it, that means it will keep on making invalid moves (after grid is filled)
@@ -111,6 +111,8 @@ class MCTS:
         #get valid actions, mask all invalid actions to 0, reconvert to probability.
         #use ucb/puct formula to get max from valid actions and return everything
         #how am i supposed to mask bad actions???
+        #mask calcpi invalid to 0 and choose actions from predpi or calcpi? 
+        # -> choosing prepi to get exp and mask invalid exp to -inf to choose action 
         return self.extract(valid_actions,root)
     
     def extract(self,valid_actions,root,t=1):
@@ -122,8 +124,8 @@ class MCTS:
         Pi[~valid_actions] = 0
         total = sum(Pi)
         calcpi = [x/total for x in Pi]
-        expected = root.PUCT(calcpi)
-        expected[~valid_actions] = 0
+        expected = root.PUCT(predpi)
+        expected[~valid_actions] = float('-inf')
         best = expected.index(max(expected))
         child = self.children[best]
         predr = child.R
@@ -154,14 +156,16 @@ class MCTS:
 class MuZero:
     def __init__(self,Env):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.network = ResNet18(Env.getparams())
-        self.network.to(self.device)
         self.Env = Env
         self.replay_buffer = deque(maxlen=10000)
-
+        obs_channels,state_channels,state_action_channels,height,width,actionspace = Env.getparams()
+        self.network = ResNet18(obs_channels,state_channels,state_action_channels,height,width,actionspace)
+        self.network.to(self.device)
+        self.action_space = Env.action_space()
+   
     def play(self,games=800):
         for g in range(games):
-            O = []
+            #O = []
             A = []
             R = []
             predPi = []
@@ -172,8 +176,9 @@ class MuZero:
             obs = self.env.Observation()
             mcts = MCTS(self.dots)
             while not self.Env.gameover():
-                O.append(obs)
-                predpi,calcpi,predv,predr,action = mcts.simulate(obs,self.Env,self.network,sims=800)
+                #O.append(obs)
+                valid_actions = self.Env.valid_actions()
+                predpi,calcpi,predv,predr,action = mcts.simulate(obs,self.action_space,valid_actions,self.network,sims=800)
                 predPi.append(predpi)
                 calcPi.append(calcpi)
                 predV.append(predv)
@@ -185,7 +190,7 @@ class MuZero:
             #have to store a done variable too to show that one game is finished and next is starting.
             for i in range(len(A)):
                 self.replay_buffer.append({
-                #"S": S[i],
+                #"O": O[i],
                 #"A" : A[i],
                 "U" : R[i],
                 "ModelPi" : predPi[i],
